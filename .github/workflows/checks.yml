@@ -1,0 +1,46 @@
+# Runs the checks that don't need a GCP project, on every pull request.
+#
+# Deliberately not an `apply` or a `plan`: both need real credentials, and a
+# workflow holding keys to a billable project is a much bigger commitment than
+# this repo warrants. What's here catches the mistakes that actually happen —
+# unformatted HCL, a config that won't parse, and a startup script that renders
+# into broken bash.
+#
+# Everything below is `scripts/check.sh`, which you can run yourself before
+# pushing. Keeping the logic in the script rather than in this file means CI and
+# your laptop run the same thing.
+
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: # so you can run it by hand from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          # Pinned for the same reason main.tf pins the provider: a version
+          # bump months from now shouldn't change behaviour under you.
+          terraform_version: 1.9.8
+          # Required. The wrapper intercepts stdout, which breaks reading the
+          # rendered template back out of `terraform console`.
+          terraform_wrapper: false
+
+      # shellcheck and python3 are both preinstalled on ubuntu-latest.
+      # REQUIRE_SHELLCHECK turns a missing binary into a failure rather than a
+      # silently skipped check, so CI can't quietly stop linting.
+      - name: Run checks
+        env:
+          REQUIRE_SHELLCHECK: "1"
+        run: ./scripts/check.sh

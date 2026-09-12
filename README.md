@@ -330,6 +330,25 @@ so a tunnel left active across the cycle will fail its handshake until you toggl
 
 ---
 
+## Checking your changes
+
+If you edit any of these files, run this before you apply anything:
+
+```bash
+./scripts/check.sh
+```
+
+It checks formatting, validates both configs, renders the startup script and confirms the
+result is valid bash, and proves the input validations still reject bad peer keys. It needs no
+GCP project and takes a few seconds. GitHub Actions runs the same script on every pull request.
+
+The one worth knowing about is the render. `terraform validate` does **not** evaluate
+`templatefile()`, so a mistyped `${...}` in `startup-script.sh` passes validate and only fails
+at apply, after you've waited for a VM to build. Rendering it up front turns a ten-minute
+mistake into a two-second one.
+
+---
+
 ## What you'll have learned
 
 - **Terraform:** providers, resources, variables, outputs, implicit dependencies, state and why it's sensitive, the plan-then-apply habit, destroy as a normal operation
