@@ -125,6 +125,8 @@ Read each one — they're short, and reading them now means the `plan` output in
 
 **One thing to notice in the startup script:** the key generation is wrapped in `if [ ! -f hub_private.key ]`. Without that, every reboot would generate new keys and silently break every client config. Small detail, painful bug.
 
+The repo also contains a `bootstrap/` folder and a `docs/` folder. Ignore both for now — they're the optional Stage 9, and nothing in Stages 1-8 needs them.
+
 Create `terraform.tfvars` in the same folder:
 
 ```hcl
@@ -258,6 +260,74 @@ One caveat to notice: the new VM generates a **new key pair**, so you'll redo St
 
 **Your turn:** that's slightly annoying. Work out how you'd make the hub's identity survive a destroy/apply cycle. There are a few approaches — storing the key in Secret Manager and having the startup script fetch it, or keeping the boot disk and recreating only the instance. Think through what each costs you, in money and in risk. This is a real infrastructure design tradeoff, and reasoning through it is worth more than the answer.
 
+Once you've formed your own view, [`docs/stage-8-persistent-identity.md`](docs/stage-8-persistent-identity.md) works through five options with current prices. Two things in it are worth knowing before you commit to an approach: in this region the VM and its disk are **free** under GCP's Always Free tier, and an external IP costs about **twice as much idle as in use**. Together those make "keep the boot disk and stop the VM" the most expensive option on the list, which is not where most people's intuition lands. Stage 9 below builds the cheap one.
+
+---
+
+## Stage 9 — Optional: keep the hub's identity across destroy cycles
+
+Skip this until Stage 8 has annoyed you at least twice. It's the answer to that exercise, and
+it costs **$0.20/month** while the VPN is destroyed, or $0.00 if you don't own a domain.
+
+The idea: split the project into two Terraform states. The `bootstrap/` folder holds the things
+that must outlive a destroy — the hub's key, the VM's service account, a DNS zone. The root
+folder stays disposable exactly as it is now.
+
+Why a separate folder rather than a `prevent_destroy` lifecycle rule: **`prevent_destroy` does
+not exempt a resource from `terraform destroy`, it makes the whole destroy fail.** You'd get a
+half-torn-down stack and a VM still billing. Separating lifecycles into separate states is the
+mechanism that actually works, and it's what real platform teams do.
+
+```bash
+cd bootstrap
+cp terraform.tfvars.example terraform.tfvars     # set project_id
+terraform init
+terraform apply
+terraform output -raw root_tfvars >> ../terraform.tfvars
+cd ..
+```
+
+That's it for the key — `bootstrap/` also enables the Secret Manager API, so there's nothing to
+turn on by hand. The secret starts empty; the VM generates the hub key on its first boot and
+publishes version 1 itself, so the private key never touches your laptop or any state file.
+
+Two optional extras in `terraform.tfvars`, both worth it:
+
+**A stable hostname.** If you own a domain, set `dns_domain = "example.com."` in
+`bootstrap/terraform.tfvars` before applying, then point your registrar's nameservers at
+`terraform output dns_name_servers`. Clients pin `vpn.example.com:51820` and never need editing
+again. Without this the hub key survives but the IP still changes, so you'd still be editing
+every client — which was most of the annoyance.
+
+**Peers as code.** Declare your devices instead of SSHing in after every apply:
+
+```hcl
+peers = {
+  macbook = { public_key = "<your Mac's public key>",   tunnel_ip = "10.20.0.2" }
+  phone   = { public_key = "<your phone's public key>", tunnel_ip = "10.20.0.3" }
+}
+```
+
+Client *public* keys are not secrets, so this costs nothing in risk. Note the consequence:
+declared peers become the source of truth, so a peer added with `add-peer` on the VM will
+disappear on the next apply. That's the right behaviour and it will still catch you once.
+
+**Now do the test that matters:**
+
+```bash
+terraform apply && sleep 120
+terraform output identity_survives_destroy
+eval "$(terraform output -raw hub_public_key_command)"     # note the key
+terraform destroy && terraform apply && sleep 120
+eval "$(terraform output -raw hub_public_key_command)"     # same key
+```
+
+Same hub key, same endpoint name, peers already configured. Deactivate and reactivate the
+tunnel in the WireGuard app — it resolves the `Endpoint` name at activation, not continuously,
+so a tunnel left active across the cycle will fail its handshake until you toggle it.
+
+**Checkpoint:** you edited no client config and never opened an SSH session.
+
 ---
 
 ## What you'll have learned
@@ -265,5 +335,6 @@ One caveat to notice: the new VM generates a **new key pair**, so you'll redo St
 - **Terraform:** providers, resources, variables, outputs, implicit dependencies, state and why it's sensitive, the plan-then-apply habit, destroy as a normal operation
 - **GCP:** projects and billing, API enablement, application default credentials, static IPs, firewall rules with target tags, startup scripts
 - **Networking:** full versus split tunnel routing, source NAT, DNS leaks and why they defeat a working VPN, IP-based geolocation and its limits
+- **From Stage 9, if you did it:** splitting one project across two states by lifecycle, why `prevent_destroy` isn't the tool it looks like, secrets fetched at boot from an instance's own identity, service accounts and least privilege, and reading a pricing page before trusting your instinct about cost
 
 **The transferable bit:** this is the same discipline behind reproducible environments at work. When an infrastructure team says a change is "in the Terraform," you now know what that means — the code is the source of truth, and the console is just a view of it.
