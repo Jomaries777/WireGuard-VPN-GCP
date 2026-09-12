@@ -1,0 +1,10 @@
+project_id = "wg-us-vpn-changeme"
+
+# Optional. A domain you own, fully qualified with the trailing dot. Creates a
+# Cloud DNS zone ($0.20/month) so clients pin a hostname and never need their
+# Endpoint line edited again. Leave it out if you don't own a domain.
+# dns_domain = "example.com."
+
+# Set to false if you'd rather seed the hub key yourself and keep the VM's
+# access read-only. See variables.tf.
+# allow_vm_to_seed_key = false

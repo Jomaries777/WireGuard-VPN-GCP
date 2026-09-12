@@ -1,1 +1,31 @@
 project_id = "wg-us-vpn-changeme"
+
+# Narrow this to your own address if your home IP is stable enough.
+# ssh_source_ranges = ["203.0.113.4/32"]
+
+
+# ----------------------------------------------------------------------------
+# Optional — everything below makes the hub survive a destroy/apply cycle
+# ----------------------------------------------------------------------------
+# Leave it all out and the project behaves exactly as Stages 1-7 describe.
+#
+# To fill it in, apply the bootstrap/ folder once and append its handoff block:
+#
+#   cd bootstrap && terraform init && terraform apply
+#   terraform output -raw root_tfvars >> ../terraform.tfvars
+#
+# Reasoning and costs: docs/stage-8-persistent-identity.md
+
+# hub_key_secret_id        = "wg-us-hub-key"
+# vm_service_account_email = "wg-us-vm@wg-us-vpn-changeme.iam.gserviceaccount.com"
+# dns_zone_name            = "wg-us-zone"
+# dns_hostname             = "vpn.example.com."
+
+# Devices allowed on the tunnel. Client PUBLIC keys only — never a private key,
+# since this file's contents end up in terraform.tfstate. Each device needs its
+# own address inside the hub_address subnet, and 10.20.0.1 belongs to the hub.
+#
+# peers = {
+#   macbook = { public_key = "REPLACE_WITH_44_CHAR_CLIENT_PUBLIC_KEY_1=", tunnel_ip = "10.20.0.2" }
+#   phone   = { public_key = "REPLACE_WITH_44_CHAR_CLIENT_PUBLIC_KEY_2=", tunnel_ip = "10.20.0.3" }
+# }

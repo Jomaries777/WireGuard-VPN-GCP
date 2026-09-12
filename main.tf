@@ -7,12 +7,18 @@
 #   3. google_compute_firewall  -> a rule allowing SSH (TCP 22)
 #   4. google_compute_instance  -> the VM itself, running Ubuntu + WireGuard
 #
+# ...plus one optional fifth, a DNS A record, if you have applied the bootstrap/
+# folder with a domain. Everything optional defaults to off, so this file builds
+# exactly the four resources above until you opt in.
+#
 # Terraform works out the order by itself. It sees that the VM block references
 # the address block, so it creates the address first. You never write the order
 # down — you write the relationships, and it derives the order. That is the
 # core idea behind declarative infrastructure.
 #
-# Run `terraform destroy` to remove all four. Nothing else is left behind.
+# Run `terraform destroy` to remove all of it. Nothing else is left behind —
+# which is also the problem the bootstrap/ folder exists to solve, since "all of
+# it" includes the hub's identity. See docs/stage-8-persistent-identity.md.
 # ============================================================================
 
 
@@ -168,23 +174,117 @@ resource "google_compute_instance" "vpn" {
     }
   }
 
-  # Runs once on the VM's first boot, as root. Installs WireGuard, generates the
-  # hub's key pair, enables IP forwarding and NAT, starts the tunnel, and
-  # installs the `add-peer` helper.
+  # Runs on the VM's boot, as root. Installs WireGuard, establishes the hub's key
+  # pair, enables IP forwarding and NAT, starts the tunnel, and installs the
+  # `add-peer` helper.
   #
-  # templatefile() reads startup-script.sh and substitutes ${hub_address} into
-  # it before upload, so the tunnel address is defined in one place.
+  # templatefile() reads startup-script.sh and substitutes these values into it
+  # before upload, so each is defined in exactly one place.
   #
   # Note this runs AFTER `terraform apply` reports success — apply finishes when
   # the VM exists, not when the software inside it is ready. Give it two minutes.
   metadata_startup_script = templatefile("${path.module}/startup-script.sh", {
-    hub_address = var.hub_address
+    hub_address   = var.hub_address
+    project_id    = var.project_id
+    key_secret_id = var.hub_key_secret_id
+    peer_blocks   = local.peer_blocks
   })
 
-  # The identity the VM itself uses when calling Google APIs. Not needed for the
-  # VPN to work, but required if you later extend the startup script to fetch a
-  # key from Secret Manager (the Stage 8 exercise).
+  # The identity the VM uses when calling Google APIs.
+  #
+  # Leaving email unset falls back to the DEFAULT compute service account, which
+  # in older projects holds Editor on the whole project. Pointing this at the
+  # account from bootstrap/ instead gives the VM two permissions on one secret
+  # and nothing else — a narrower blast radius than the original config, not a
+  # wider one.
+  #
+  # Scope and permission are different things: cloud-platform scope means "don't
+  # filter this account's API access", and grants nothing on its own. The IAM
+  # bindings in bootstrap/ are what actually allow anything.
   service_account {
+    email  = var.vm_service_account_email != "" ? var.vm_service_account_email : null
     scopes = ["cloud-platform"]
   }
+
+  lifecycle {
+    # Fetching the key needs an identity that holds permission on the secret, and
+    # the default compute service account does not. Without this check the VM
+    # builds fine and the tunnel silently comes up under a fresh key — a failure
+    # that looks like a WireGuard problem and isn't.
+    precondition {
+      condition     = var.hub_key_secret_id == "" || var.vm_service_account_email != ""
+      error_message = "hub_key_secret_id needs vm_service_account_email set too. Both come from `terraform output` in bootstrap/."
+    }
+
+    # A peer given the hub's own tunnel address produces a routing loop rather
+    # than an error message.
+    precondition {
+      condition     = !contains([for name, p in var.peers : p.tunnel_ip], local.hub_tunnel_ip)
+      error_message = "A peer is using ${local.hub_tunnel_ip}, which is the hub's own tunnel address. Give each device a different one."
+    }
+  }
+}
+
+
+# ============================================================================
+# Stage 9 additions — only active once you have applied the bootstrap/ folder
+# ============================================================================
+# Everything below defaults to off, so the four resources above are still the
+# whole story until you opt in. Kept at the end of the file so the numbered walk
+# through 1-to-4 reads as it always did.
+#
+# Why any of this exists: `terraform destroy` takes the hub's identity with it,
+# so every client config breaks on the next apply. The reasoning, and the prices
+# that decide between the approaches, are in
+# docs/stage-8-persistent-identity.md.
+# ============================================================================
+
+
+# ----------------------------------------------------------------------------
+# Peer stanzas, rendered here rather than looped over in bash
+# ----------------------------------------------------------------------------
+# var.peers becomes a block of wg0.conf text. Doing this in HCL keeps the
+# startup script readable — the alternative is a bash loop building config with
+# string concatenation, which is where quoting bugs live.
+locals {
+  peer_blocks = join("", [
+    for name, p in var.peers : <<-EOT
+
+      # ${name}
+      [Peer]
+      PublicKey = ${p.public_key}
+      AllowedIPs = ${p.tunnel_ip}/32
+    EOT
+  ])
+
+  # The hub's own tunnel address without the prefix length, so we can check no
+  # peer has been given the same address.
+  hub_tunnel_ip = split("/", var.hub_address)[0]
+}
+
+
+# ----------------------------------------------------------------------------
+# Optional — DNS A record, so clients pin a NAME instead of an address
+# ----------------------------------------------------------------------------
+# Created only when you have applied the bootstrap/ folder with a domain set.
+#
+# The reserved IP above is released by `terraform destroy` and you get a
+# different one next time, so every client's Endpoint line breaks even if the
+# hub's key survives. Holding the IP through the destroy would fix that and cost
+# about $7.30/month, since an unattached external IPv4 bills at roughly twice
+# the in-use rate — more than simply never destroying the VM. A DNS zone is
+# $0.20/month, so the cheap fix is to let the address churn and keep the name.
+#
+# TTL is deliberately 60. WireGuard resolves Endpoint when the tunnel is
+# activated, not continuously, so after an apply you deactivate and reactivate
+# the tunnel. A long TTL turns that into a confusing few minutes of failed
+# handshakes.
+resource "google_dns_record_set" "vpn" {
+  count = (var.dns_zone_name == "" || var.dns_hostname == "") ? 0 : 1
+
+  name         = var.dns_hostname
+  managed_zone = var.dns_zone_name
+  type         = "A"
+  ttl          = 60
+  rrdatas      = [google_compute_address.vpn.address]
 }
